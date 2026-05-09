@@ -4,11 +4,13 @@ langchain-huggingface
 langchain-nvidia-ai-endpoints
 langchain-chroma
 langgraph
-langchain-classic
 langchain-experimental
 streamlit
-chromadb
+chromadb==0.4.24
 pypdf
-flashrank
 python-dotenv
 sentence-transformers
+rank-bm25
+protobuf==4.25.3
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
