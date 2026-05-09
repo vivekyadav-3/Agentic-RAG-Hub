@@ -1,3 +1,10 @@
+# --- STREAMLIT CLOUD SQLITE3 FIX ---
+# Streamlit Cloud has an old SQLite3 version. This overrides it with the newer pysqlite3-binary.
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- END FIX ---
+
 import streamlit as st
 import asyncio
 import os
