@@ -16,3 +16,5 @@ opentelemetry-api==1.24.0
 opentelemetry-sdk==1.24.0
 numpy<2.0
 pysqlite3-binary
+langchain-openai
+langchain-google-genai
