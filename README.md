@@ -8,12 +8,14 @@ This application goes beyond standard RAG pipelines by implementing a **Self-Cor
 
 ## ✨ Key Features
 
-- **🤖 Agentic Workflow (LangGraph):** Implements a self-reflective cycle (`Retrieve -> Grade -> Generate/Transform`) to ensure only highly relevant context is used.
+- **🤖 Modular Agentic Workflow (LangGraph):** Implements a self-reflective cycle (`Retrieve -> Grade -> Generate/Transform`) to ensure only highly relevant context is used. Separated logic into `agent_graph.py` for enterprise-grade scalability.
+- **🧠 Persistent Memory:** Implements `MemorySaver` checkpointer so the AI agent remembers the full context of your session without relying entirely on UI history.
 - **⚡ Hybrid Search:** Combines semantic vector similarity with BM25 keyword matching for superior document retrieval.
-- **🎯 AI Reranking:** Integrates `FlashrankRerank` to re-order retrieved chunks, pushing the most accurate data to the top.
+- **🎯 AI Reranking:** Integrates `NVIDIARerank` (llama-3.2-nv-rerank-27b) to re-order retrieved chunks, pushing the most accurate data to the top.
 - **🔄 Multi-Query Strategist:** Automatically translates user intent into multiple optimized search queries to capture broader context.
-- **🛡️ Rate-Limit Resilient:** Built-in dynamic fallbacks and exponential backoff mechanisms to handle API throttling gracefully.
+- **🛡️ Rate-Limit Resilient:** Built-in dynamic fallbacks and exponential backoff mechanisms to handle API throttling gracefully without hardcoded sleeps.
 - **📊 Interactive UI:** A sleek, dark-themed Streamlit dashboard with real-time toggle controls for all advanced AI parameters.
+- **🔬 Learning Labs:** Includes dedicated sandbox folders (`section_17`, `section_18`, `section_21`, `section_23`) containing raw scripts for Multi-Agent routing, Hierarchical Agents, and RAG Benchmarking.
 
 ---
 

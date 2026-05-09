@@ -4,10 +4,11 @@ langchain-huggingface
 langchain-nvidia-ai-endpoints
 langchain-chroma
 langgraph
+langchain-classic
+langchain-experimental
 streamlit
 chromadb
 pypdf
 flashrank
-langchain-experimental
 python-dotenv
 sentence-transformers

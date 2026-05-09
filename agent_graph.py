@@ -1,186 +1,114 @@
-import os
-import warnings
-from typing import List, TypedDict
-from typing_extensions import Annotated
-
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.messages import HumanMessage, BaseMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
+import asyncio
+import operator
+from typing import List, Annotated, TypedDict, Any, Union
 from langgraph.graph import END, StateGraph, START
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
-warnings.filterwarnings("ignore")
-
-# --- 1. SETUP KNOWLEDGE BASE ---
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-# Use the same directory as the app.py to share data
-persist_directory = "./db"
-vector_store = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-# --- 2. DEFINE STATE ---
+# --- 1. STATE DEFINITION (Pure Native Memory) ---
 class GraphState(TypedDict):
-    """
-    Represents the state of our graph.
-    """
+    # This automatically appends new messages, creating a permanent history in the checkpointer
+    messages: Annotated[List[BaseMessage], operator.add]
     question: str
     generation: str
-    documents: List[str]
+    documents: List[Any]
 
-# --- 3. INITIALIZE LLM ---
-# Fallback API Key from main.py if not in environment
-# Do not hardcode API keys. Use environment variables or sidebar input.
-if "NVIDIA_API_KEY" not in os.environ:
-    print("Please set the NVIDIA_API_KEY environment variable.")
-
-print("Initializing LLM and Embeddings...")
-llm = ChatNVIDIA(model="meta/llama-3.1-70b-instruct", temperature=0)
-
-# --- 4. DEFINE NODES ---
-
-def retrieve(state):
-    """
-    Retrieve documents from vectorstore
-    """
-    print("\n--- RETRIEVING DOCUMENTS ---")
-    question = state["question"]
-    documents = retriever.invoke(question)
-    return {"documents": [d.page_content for d in documents], "question": question}
-
-def grade_documents(state):
-    """
-    Determines whether the retrieved documents are relevant to the question.
-    """
-    import time
-    print("\n--- CHECKING DOCUMENT RELEVANCE ---")
-    question = state["question"]
-    documents = state["documents"]
-    
-    prompt = ChatPromptTemplate.from_template(
-        "Grade the relevance of this doc to the question: {question}. Doc: {document}. Answer with exactly one word: 'yes' or 'no'."
-    )
-    grader_chain = prompt | llm | StrOutputParser()
-    
-    filtered_docs = []
-    # Only grade top 3 for speed and API safety
-    for d in documents[:3]:
+# --- 2. ASYNC RETRY WRAPPER ---
+async def with_retry_async(func, retries=3, backoff=2):
+    for i in range(retries):
         try:
-            res = grader_chain.invoke({"question": question, "document": d})
-            if "yes" in res.lower():
-                print("  - GRADE: DOCUMENT RELEVANT")
-                filtered_docs.append(d)
-            else:
-                print("  - GRADE: DOCUMENT NOT RELEVANT")
-            time.sleep(1) # Rate limit safety
+            return await func()
         except Exception as e:
-            print(f"  - GRADING ERROR: {e}")
-            filtered_docs.append(d)
-    
-    return {"documents": filtered_docs, "question": question}
+            if i == retries - 1:
+                print(f"Failed after {retries} attempts: {e}")
+                raise e
+            await asyncio.sleep(backoff * (i + 1))
 
-def generate(state):
-    """
-    Generate answer
-    """
-    print("\n--- GENERATING ANSWER ---")
-    question = state["question"]
-    documents = state["documents"]
+# --- 3. GRAPH ENGINE (Async) ---
+def get_agent_graph(llm, retriever, contextualize_q_chain, final_qa_chain, memory):
     
-    prompt = ChatPromptTemplate.from_template(
-        """You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. \n
-        If you don't know the answer, just say that you don't know. \n
-        Question: {question} \n
-        Context: {context} \n
-        Answer:"""
+    async def retrieve_node(state: GraphState):
+        try:
+            # We use the built-in 'messages' history for context
+            standalone_q = await contextualize_q_chain.ainvoke({
+                "input": state["question"], 
+                "chat_history": state["messages"]
+            })
+            docs = await with_retry_async(lambda: retriever.ainvoke(standalone_q))
+        except Exception as e:
+            print(f"Retrieval error: {e}")
+            docs = []
+        return {"documents": docs, "question": state["question"]}
+
+    async def grade_node(state: GraphState):
+        prompt_grade = ChatPromptTemplate.from_template(
+            "Grade the relevance of this doc to the question: {question}. Doc: {document}. Answer with exactly one word: 'yes' or 'no'."
+        )
+        grader = prompt_grade | llm | StrOutputParser()
+        
+        async def grade_single_doc(d):
+            try:
+                res = await with_retry_async(
+                    lambda: grader.ainvoke({"question": state["question"], "document": d.page_content}), 
+                    retries=2, backoff=1
+                )
+                return d if "yes" in res.lower() else None
+            except Exception as e:
+                print(f"Grading error: {e}")
+                return d # Keep it if there's an API failure just to be safe
+                
+        # Fire off all grading tasks at the exact same time (Parallel)
+        tasks = [grade_single_doc(d) for d in state["documents"][:5]]
+        results = await asyncio.gather(*tasks)
+        
+        # Filter out the documents that got a 'no' (which return None)
+        relevant_docs = [doc for doc in results if doc is not None]
+        
+        return {"documents": relevant_docs}
+
+    async def generate_node(state: GraphState):
+        context = "\n\n".join(d.page_content for d in state["documents"])
+        try:
+            # The final chain is used to generate. 
+            # Note: We stream tokens in app.py using astream_events
+            ans = await with_retry_async(lambda: final_qa_chain.with_config({"tags": ["final_node"]}).ainvoke({
+                "context": context,
+                "chat_history": state["messages"],
+                "input": state["question"]
+            }))
+        except Exception as e:
+            print(f"Generation error: {e}")
+            ans = "Error generating answer."
+        return {"generation": ans}
+
+    async def transform_node(state: GraphState):
+        prompt_trans = ChatPromptTemplate.from_template(
+            "Rewrite the question to be better for vector search. Output ONLY the question. Original: {question}"
+        )
+        trans_chain = prompt_trans | llm | StrOutputParser()
+        try:
+            new_q = await with_retry_async(lambda: trans_chain.ainvoke({"question": state["question"]}))
+        except Exception as e:
+            new_q = state["question"]
+        return {"question": new_q}
+
+    # --- BUILD GRAPH ---
+    workflow = StateGraph(GraphState)
+    workflow.add_node("retrieve", retrieve_node)
+    workflow.add_node("grade", grade_node)
+    workflow.add_node("generate", generate_node)
+    workflow.add_node("transform", transform_node)
+
+    workflow.add_edge(START, "retrieve")
+    workflow.add_edge("retrieve", "grade")
+    workflow.add_conditional_edges(
+        "grade",
+        lambda x: "generate" if x["documents"] else "transform",
+        {"generate": "generate", "transform": "transform"}
     )
+    workflow.add_edge("transform", "retrieve")
+    workflow.add_edge("generate", END)
     
-    # Post-processing
-    def format_docs(docs):
-        return "\n\n".join(docs)
-    
-    rag_chain = prompt | llm | StrOutputParser()
-    
-    generation = rag_chain.invoke({"context": format_docs(documents), "question": question})
-    return {"documents": documents, "question": question, "generation": generation}
-
-def transform_query(state):
-    """
-    Transform the query to produce a better question.
-    """
-    import time
-    print("\n--- TRANSFORMING QUERY ---")
-    question = state["question"]
-    
-    prompt = ChatPromptTemplate.from_template(
-        "You are a strict search query optimizer. Rewrite the following question to be better for a vector database search. Output ONLY the rewritten question string, with NO introductory text, NO quotes, and NO conversational filler.\n\nOriginal Question: {question}"
-    )
-    
-    chain = prompt | llm | StrOutputParser()
-    time.sleep(2) # Prevent rapid API calls
-    better_question = chain.invoke({"question": question})
-    print(f"  - IMPROVED QUESTION: {better_question}")
-    return {"documents": state["documents"], "question": better_question}
-
-# --- 5. DEFINE CONDITIONAL EDGES ---
-
-def decide_to_generate(state):
-    """
-    Determines whether to generate an answer, or re-generate a question.
-    """
-    print("\n--- DECIDING NEXT STEP ---")
-    if not state["documents"]:
-        # All documents have been filtered check_relevance
-        # We will re-generate a new query
-        print("  - DECISION: TRANSFORM QUERY")
-        return "transform_query"
-    else:
-        # We have relevant documents, so generate answer
-        print("  - DECISION: GENERATE ANSWER")
-        return "generate"
-
-# --- 6. BUILD GRAPH ---
-workflow = StateGraph(GraphState)
-
-# Define the nodes
-workflow.add_node("retrieve", retrieve) 
-workflow.add_node("grade_documents", grade_documents) 
-workflow.add_node("generate", generate) 
-workflow.add_node("transform_query", transform_query) 
-
-# Build graph
-workflow.add_edge(START, "retrieve")
-workflow.add_edge("retrieve", "grade_documents")
-workflow.add_conditional_edges(
-    "grade_documents",
-    decide_to_generate,
-    {
-        "transform_query": "transform_query",
-        "generate": "generate",
-    },
-)
-workflow.add_edge("transform_query", "retrieve")
-workflow.add_edge("generate", END)
-
-# Compile
-app = workflow.compile()
-
-# --- 7. RUN THE AGENT ---
-if __name__ == "__main__":
-    print("\n--- DETAILED AGENTIC RAG STARTING ---")
-    
-    # Test Question
-    inputs = {"question": "What is the 'Black Box' problem in AI ethics?"}
-    
-    # Run with recursion limit
-    try:
-        for output in app.stream(inputs, config={"recursion_limit": 5}):
-            for key, value in output.items():
-                print(f"Node '{key}':")
-    except Exception as e:
-        print(f"\n--- STOPPED: {e} ---")
-        value = {"generation": "I searched multiple times but could not find relevant info."}
-    
-    print("\n--- FINAL GENERATION ---")
-    print(value.get("generation", "No generation produced."))
+    return workflow.compile(checkpointer=memory)
