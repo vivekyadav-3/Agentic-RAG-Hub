@@ -1,0 +1,5 @@
+[
+  {"id": 1, "name": "Alice", "bio": "Alice is a software engineer who loves Python and AI."},
+  {"id": 2, "name": "Bob", "bio": "Bob is a data scientist specializing in vector databases."},
+  {"id": 3, "name": "Charlie", "bio": "Charlie is a researcher focused on Large Language Models."}
+]

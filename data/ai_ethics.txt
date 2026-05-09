@@ -1,0 +1,4 @@
+AI Ethics is a field of study that focuses on the moral implications of artificial intelligence. 
+Key concerns include algorithmic bias, where AI systems perpetuate human prejudices. 
+Privacy is another major issue, as AI requires vast amounts of data to function. 
+Lastly, the 'Black Box' problem refers to the difficulty in understanding how complex AI models reach their decisions.

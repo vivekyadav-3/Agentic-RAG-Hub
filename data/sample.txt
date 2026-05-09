@@ -1,0 +1,1 @@
+LangChain allows us to load many types of data and turn them into searchable knowledge.
