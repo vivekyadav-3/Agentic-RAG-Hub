@@ -28,6 +28,8 @@ MANIFEST
 
 # Vector DB
 db/
+db_chronos/
+chroma_db/
 
 # Streamlit
 .streamlit/
